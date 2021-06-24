@@ -1,0 +1,57 @@
+name: BuildMSVCx64
+
+on:
+  push:
+    branches: [ master ]
+  pull_request:
+    branches: [ master ]
+
+env:
+  BUILD_TYPE: Release
+
+jobs:
+  build:
+    runs-on: windows-latest
+
+    steps:
+    - uses: actions/checkout@v2
+
+    - name: Download deps
+      working-directory: ${{github.workspace}}
+      run:  git clone --depth 1 https://github.com/xmrig/xmrig-deps.git
+    
+    - name: Configure CMake
+      run: cmake -B ${{github.workspace}}/build -DCMAKE_BUILD_TYPE=${{env.BUILD_TYPE}} -G "Visual Studio 16 2019" -A x64 -DXMRIG_DEPS=${{github.workspace}}/xmrig-deps/msvc2019/x64
+
+    - name: Build
+      # Build your program with the given configuration
+      run: cmake --build ${{github.workspace}}/build --config ${{env.BUILD_TYPE}}
+      
+    - name: Zip release
+      uses: papeloto/action-zip@v1
+      with:
+        files: ${{github.workspace}}/build/Release/
+        dest: ${{github.workspace}}/xmrig-msvc-win64.zip
+
+    - name: Create Release
+      id: create_release
+      uses: actions/create-release@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+        tag_name: ${{ github.ref }}
+        release_name: Release ${{ github.ref }}
+        draft: false
+        prerelease: false
+    
+    - name: Upload Release Asset
+      id: upload-release-asset 
+      uses: actions/upload-release-asset@v1
+      env:
+        GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+      with:
+       upload_url: ${{ steps.create_release.outputs.upload_url }} 
+       asset_path: ${{github.workspace}}/xmrig-msvc-win64.zip
+       asset_name: xmrig-msvc-win64.zip
+       asset_content_type: application/zip
+      
