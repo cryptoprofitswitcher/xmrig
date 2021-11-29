@@ -1,3 +1,20 @@
+# v6.16.1
+- [#2729](https://github.com/xmrig/xmrig/pull/2729) GhostRider fixes:
+  - Added average hashrate display
+  - Fixed the number of threads shown at startup
+  - Fixed `--threads` or `-t` command line option (but `--cpu-max-threads-hint` is recommended to use)
+- [#2738](https://github.com/xmrig/xmrig/pull/2738) GhostRider fixes:
+  - Fixed "difficulty is not a number" error when diff is high on some pools
+  - Fixed GhostRider compilation when WITH_KAWPOW=OFF
+- [#2740](https://github.com/xmrig/xmrig/pull/2740) Added VAES support for Cryptonight variants **+4% speedup on Zen3**
+  - VAES instructions are available on Intel Ice Lake/AMD Zen3 and newer CPUs.
+  - +4% speedup on Ryzen 5 5600X.
+
+# v6.16.0
+- [#2712](https://github.com/xmrig/xmrig/pull/2712) **GhostRider algorithm (Raptoreum) support**: read the [RELEASE NOTES](src/crypto/ghostrider/README.md) for quick start guide and performance comparisons.
+- [#2682](https://github.com/xmrig/xmrig/pull/2682) Fixed: use cn-heavy optimization only for Vermeer CPUs.
+- [#2684](https://github.com/xmrig/xmrig/pull/2684) MSR mod: fix for error 183.
+
 # v6.15.3
 - [#2614](https://github.com/xmrig/xmrig/pull/2614) OpenCL fixes for non-AMD platforms.
 - [#2623](https://github.com/xmrig/xmrig/pull/2623) Fixed compiling without kawpow.

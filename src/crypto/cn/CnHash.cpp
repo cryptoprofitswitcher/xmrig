@@ -310,6 +310,15 @@ xmrig::CnHash::CnHash()
     m_map[Algorithm::ASTROBWT_DERO]->data[AV_SINGLE_SOFT][Assembly::NONE] = astrobwt::single_hash<Algorithm::ASTROBWT_DERO>;
 #   endif
 
+#   ifdef XMRIG_ALGO_GHOSTRIDER
+    ADD_FN(Algorithm::CN_GR_0);
+    ADD_FN(Algorithm::CN_GR_1);
+    ADD_FN(Algorithm::CN_GR_2);
+    ADD_FN(Algorithm::CN_GR_3);
+    ADD_FN(Algorithm::CN_GR_4);
+    ADD_FN(Algorithm::CN_GR_5);
+#   endif
+
 #   ifdef XMRIG_FEATURE_ASM
     patchAsmVariants();
 #   endif
@@ -339,7 +348,7 @@ xmrig::cn_hash_fun xmrig::CnHash::fn(const Algorithm &algorithm, AlgoVariant av,
 
 #   ifdef XMRIG_ALGO_CN_HEAVY
     // cn-heavy optimization for Zen3 CPUs
-    if ((av == AV_SINGLE) && (assembly != Assembly::NONE) && (Cpu::info()->arch() == ICpuInfo::ARCH_ZEN3)) {
+    if ((av == AV_SINGLE) && (assembly != Assembly::NONE) && (Cpu::info()->arch() == ICpuInfo::ARCH_ZEN3) && (Cpu::info()->model() == 0x21)) {
         switch (algorithm.id()) {
         case Algorithm::CN_HEAVY_0:
             return cryptonight_single_hash<Algorithm::CN_HEAVY_0, false, 3>;
