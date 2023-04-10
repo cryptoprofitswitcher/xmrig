@@ -39,6 +39,12 @@ using uv_handle_t   = struct uv_handle_s;
 using uv_stream_t   = struct uv_stream_s;
 using uv_tcp_t      = struct uv_tcp_s;
 
+#ifdef XMRIG_FEATURE_TLS
+using BIO           = struct bio_st;
+using SSL           = struct ssl_st;
+using SSL_CTX       = struct ssl_ctx_st;
+#endif
+
 
 namespace xmrig {
 
@@ -80,7 +86,7 @@ private:
     bool parseJob(const rapidjson::Value &params, int *code);
     bool parseResponse(int64_t id, const rapidjson::Value &result, const rapidjson::Value &error);
     int64_t getBlockTemplate();
-    int64_t rpcSend(const rapidjson::Document &doc);
+    int64_t rpcSend(const rapidjson::Document &doc, const std::map<std::string, std::string> &headers = {});
     void retry();
     void send(const char *path);
     void setState(SocketState state);
@@ -88,7 +94,6 @@ private:
     enum {
         API_CRYPTONOTE_DEFAULT,
         API_MONERO,
-        API_DERO,
     } m_apiVersion = API_MONERO;
 
     BlockTemplate m_blocktemplate;
@@ -99,6 +104,7 @@ private:
     String m_blocktemplateStr;
     String m_currentJobId;
     String m_prevHash;
+    uint64_t m_jobSteadyMs = 0;
     String m_tlsFingerprint;
     String m_tlsVersion;
     Timer *m_timer;

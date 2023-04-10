@@ -48,8 +48,14 @@
 #include "net/JobResult.h"
 
 
+#ifdef XMRIG_FEATURE_TLS
+#include <openssl/ssl.h>
+#endif
+
+
 #include <algorithm>
 #include <cassert>
+#include <random>
 
 
 namespace xmrig {
@@ -58,7 +64,8 @@ namespace xmrig {
 Storage<DaemonClient> DaemonClient::m_storage;
 
 
-static const char* kBlocktemplateBlob = "blocktemplate_blob";
+static const char* kBlocktemplateBlob       = "blocktemplate_blob";
+static const char* kBlockhashingBlob        = "blockhashing_blob";
 static const char *kGetHeight               = "/getheight";
 static const char *kGetInfo                 = "/getinfo";
 static const char *kHash                    = "hash";
@@ -129,7 +136,7 @@ int64_t xmrig::DaemonClient::submit(const JobResult &result)
         return -1;
     }
 
-    char *data = (m_apiVersion == API_DERO) ? m_blockhashingblob.data() : m_blocktemplateStr.data();
+    char *data = m_blocktemplateStr.data();
 
     const size_t sig_offset = m_job.nonceOffset() + m_job.nonceSize();
 
@@ -141,6 +148,11 @@ int64_t xmrig::DaemonClient::submit(const JobResult &result)
         memcpy(data + sig_offset * 2, result.sig, 64 * 2);
         memcpy(data + m_blocktemplate.offset(BlockTemplate::TX_PUBKEY_OFFSET) * 2, result.sig_data, 32 * 2);
         memcpy(data + m_blocktemplate.offset(BlockTemplate::EPH_PUBLIC_KEY_OFFSET) * 2, result.sig_data + 32 * 2, 32 * 2);
+
+        // Handle view tag for txout_to_tagged_key outputs
+        if (m_blocktemplate.outputType() == 3) {
+            Cvt::toHex(data + m_blocktemplate.offset(BlockTemplate::EPH_PUBLIC_KEY_OFFSET) * 2 + 32 * 2, 2, &result.view_tag, 1);
+        }
     }
 
     if (result.extra_nonce >= 0) {
@@ -161,13 +173,7 @@ int64_t xmrig::DaemonClient::submit(const JobResult &result)
     Document doc(kObjectType);
 
     Value params(kArrayType);
-    if (m_apiVersion == API_DERO) {
-        params.PushBack(m_blocktemplateStr.toJSON(), doc.GetAllocator());
-        params.PushBack(m_blockhashingblob.toJSON(), doc.GetAllocator());
-    }
-    else {
-        params.PushBack(m_blocktemplateStr.toJSON(), doc.GetAllocator());
-    }
+    params.PushBack(m_blocktemplateStr.toJSON(), doc.GetAllocator());
 
     JsonRequest::create(doc, m_sequence, "submitblock", params);
 
@@ -177,7 +183,10 @@ int64_t xmrig::DaemonClient::submit(const JobResult &result)
     m_results[m_sequence] = SubmitResult(m_sequence, result.diff, result.actualDiff(), 0, result.backend);
 #   endif
 
-    return rpcSend(doc);
+    std::map<std::string, std::string> headers;
+    headers.insert({"X-Hash-Difficulty", std::to_string(result.actualDiff())});
+
+    return rpcSend(doc, headers);
 }
 
 
@@ -193,16 +202,16 @@ void xmrig::DaemonClient::connect()
 
     setState(ConnectingState);
 
-    if (!m_walletAddress.isValid()) {
-        return connectError("Invalid wallet address.");
-    }
-
     if (!m_coin.isValid() && !m_pool.algorithm().isValid()) {
         return connectError("Invalid algorithm.");
     }
 
-    if ((m_pool.algorithm() == Algorithm::ASTROBWT_DERO) || (m_coin == Coin::DERO)) {
-        m_apiVersion = API_DERO;
+    if (!m_pool.algorithm().isValid()) {
+        m_pool.setAlgo(m_coin.algorithm());
+    }
+
+    if ((m_apiVersion == API_MONERO) && !m_walletAddress.isValid()) {
+        return connectError("Invalid wallet address.");
     }
 
     if (m_pool.zmq_port() >= 0) {
@@ -302,16 +311,23 @@ void xmrig::DaemonClient::onHttpData(const HttpData &data)
 
 void xmrig::DaemonClient::onTimer(const Timer *)
 {
+    if (m_pool.zmq_port() >= 0) {
+        m_prevHash = nullptr;
+        m_blocktemplateRequestHash = nullptr;
+        send(kGetHeight);
+        return;
+    }
+
+    if (Chrono::steadyMSecs() >= m_jobSteadyMs + m_pool.jobTimeout()) {
+        m_prevHash = nullptr;
+        m_blocktemplateRequestHash = nullptr;
+    }
+
     if (m_state == ConnectingState) {
         connect();
     }
     else if (m_state == ConnectedState) {
-        if (m_apiVersion == API_DERO) {
-            rpcSend(JsonRequest::create(m_sequence, "get_info"));
-        }
-        else {
-            send((m_apiVersion == API_MONERO) ? kGetHeight : kGetInfo);
-        }
+        send((m_apiVersion == API_MONERO) ? kGetHeight : kGetInfo);
     }
 }
 
@@ -330,32 +346,33 @@ void xmrig::DaemonClient::onResolved(const DnsRecords &records, int status, cons
     }
 
 
-    delete m_ZMQSocket;
-
-
     const auto &record = records.get();
     m_ip = record.ip();
 
     auto req = new uv_connect_t;
     req->data = m_storage.ptr(m_key);
 
-    m_ZMQSocket = new uv_tcp_t;
-    m_ZMQSocket->data = m_storage.ptr(m_key);
+    uv_tcp_t* s = new uv_tcp_t;
+    s->data = m_storage.ptr(m_key);
 
-    uv_tcp_init(uv_default_loop(), m_ZMQSocket);
-    uv_tcp_nodelay(m_ZMQSocket, 1);
+    uv_tcp_init(uv_default_loop(), s);
+    uv_tcp_nodelay(s, 1);
 
 #   ifndef WIN32
-    uv_tcp_keepalive(m_ZMQSocket, 1, 60);
+    uv_tcp_keepalive(s, 1, 60);
 #   endif
 
-    uv_tcp_connect(req, m_ZMQSocket, record.addr(m_pool.zmq_port()), onZMQConnect);
+    if (m_pool.zmq_port() > 0) {
+        delete m_ZMQSocket;
+        m_ZMQSocket = s;
+        uv_tcp_connect(req, s, record.addr(m_pool.zmq_port()), onZMQConnect);
+    }
 }
 
 
 bool xmrig::DaemonClient::isOutdated(uint64_t height, const char *hash) const
 {
-    return m_job.height() != height || m_prevHash != hash;
+    return m_job.height() != height || m_prevHash != hash || Chrono::steadyMSecs() >= m_jobSteadyMs + m_pool.jobTimeout();
 }
 
 
@@ -392,11 +409,12 @@ bool xmrig::DaemonClient::parseJob(const rapidjson::Value &params, int *code)
         m_blocktemplate.offset(BlockTemplate::TX_PUBKEY_OFFSET) - k,
         m_blocktemplate.offset(BlockTemplate::TX_EXTRA_NONCE_OFFSET) - k,
         m_blocktemplate.txExtraNonce().size(),
-        m_blocktemplate.minerTxMerkleTreeBranch()
+        m_blocktemplate.minerTxMerkleTreeBranch(),
+        m_blocktemplate.outputType() == 3
     );
 #   endif
 
-    m_blockhashingblob = Json::getString(params, "blockhashing_blob");
+    m_blockhashingblob = Json::getString(params, kBlockhashingBlob);
 
     if (m_blocktemplate.hasMinerSignature()) {
         if (m_pool.spendSecretKey().isEmpty()) {
@@ -429,7 +447,7 @@ bool xmrig::DaemonClient::parseJob(const rapidjson::Value &params, int *code)
         }
 
         uint8_t derivation[32];
-        if (!generate_key_derivation(m_blocktemplate.blob(BlockTemplate::TX_PUBKEY_OFFSET), secret_viewkey, derivation)) {
+        if (!generate_key_derivation(m_blocktemplate.blob(BlockTemplate::TX_PUBKEY_OFFSET), secret_viewkey, derivation, nullptr)) {
             return jobError("Failed to generate key derivation for miner signature.");
         }
 
@@ -452,11 +470,6 @@ bool xmrig::DaemonClient::parseJob(const rapidjson::Value &params, int *code)
 #       endif
     }
 
-    if (m_apiVersion == API_DERO) {
-        const uint64_t offset = Json::getUint64(params, "reserved_offset");
-        Cvt::toHex(m_blockhashingblob.data() + offset * 2, kBlobReserveSize * 2, Cvt::randomBytes(kBlobReserveSize).data(), kBlobReserveSize);
-    }
-
     if (m_coin.isValid()) {
         job.setAlgorithm(m_coin.algorithm(m_blocktemplate.majorVersion()));
     }
@@ -476,13 +489,7 @@ bool xmrig::DaemonClient::parseJob(const rapidjson::Value &params, int *code)
     m_job              = std::move(job);
     m_blocktemplateStr = std::move(blocktemplate);
     m_prevHash         = Json::getString(params, "prev_hash");
-
-    if (m_apiVersion == API_DERO) {
-        // Truncate to 32 bytes to have the same data as in get_info RPC
-        if (m_prevHash.size() > 64) {
-            m_prevHash.data()[64] = '\0';
-        }
-    }
+    m_jobSteadyMs      = Chrono::steadyMSecs();
 
     if (m_state == ConnectingState) {
         setState(ConnectedState);
@@ -527,13 +534,6 @@ bool xmrig::DaemonClient::parseResponse(int64_t id, const rapidjson::Value &resu
 
     const char* error_msg = nullptr;
 
-    if ((m_apiVersion == API_DERO) && result.HasMember("status")) {
-        error_msg = result["status"].GetString();
-        if (!error_msg || (strlen(error_msg) == 0) || (strcmp(error_msg, "OK") == 0)) {
-            error_msg = nullptr;
-        }
-    }
-
     if (handleSubmitResponse(id, error_msg)) {
         if (error_msg || (m_pool.zmq_port() < 0)) {
             getBlockTemplate();
@@ -554,12 +554,7 @@ int64_t xmrig::DaemonClient::getBlockTemplate()
 
     Value params(kObjectType);
     params.AddMember("wallet_address", m_user.toJSON(), allocator);
-    if (m_apiVersion == API_DERO) {
-        params.AddMember("reserve_size", static_cast<uint64_t>(kBlobReserveSize), allocator);
-    }
-    else {
-        params.AddMember("extra_nonce", Cvt::toHex(Cvt::randomBytes(kBlobReserveSize)).toJSON(doc), allocator);
-    }
+    params.AddMember("extra_nonce", Cvt::toHex(Cvt::randomBytes(kBlobReserveSize)).toJSON(doc), allocator);
 
     JsonRequest::create(doc, m_sequence, "getblocktemplate", params);
 
@@ -567,9 +562,13 @@ int64_t xmrig::DaemonClient::getBlockTemplate()
 }
 
 
-int64_t xmrig::DaemonClient::rpcSend(const rapidjson::Document &doc)
+int64_t xmrig::DaemonClient::rpcSend(const rapidjson::Document &doc, const std::map<std::string, std::string> &headers)
 {
     FetchRequest req(HTTP_POST, m_pool.host(), m_pool.port(), kJsonRPC, doc, m_pool.isTLS(), isQuiet());
+    for (const auto &header : headers) {
+        req.headers.insert(header);
+    }
+
     fetch(tag(), std::move(req), m_httpListener);
 
     return m_sequence++;
@@ -622,6 +621,10 @@ void xmrig::DaemonClient::setState(SocketState state)
             if (m_pool.zmq_port() < 0) {
                 const uint64_t interval = std::max<uint64_t>(20, m_pool.pollInterval());
                 m_timer->start(interval, interval);
+            }
+            else {
+                const uint64_t t = m_pool.jobTimeout();
+                m_timer->start(t, t);
             }
         }
         break;
@@ -885,10 +888,19 @@ void xmrig::DaemonClient::ZMQParse()
     m_ZMQRecvBuf.erase(m_ZMQRecvBuf.begin(), m_ZMQRecvBuf.begin() + (data - m_ZMQRecvBuf.data()));
 
 #   ifdef APP_DEBUG
-    LOG_DEBUG(CYAN("tcp-zmq://%s:%u") BLACK_BOLD(" read ") CYAN_BOLD("%zu") BLACK_BOLD(" bytes") " %s", m_pool.host().data(), m_pool.zmq_port(), msg.size(), msg.data());
+    msg.push_back('\0');
+    LOG_DEBUG(CYAN("tcp-zmq://%s:%u") BLACK_BOLD(" read ") CYAN_BOLD("%zu") BLACK_BOLD(" bytes") " %s", m_pool.host().data(), m_pool.zmq_port(), msg.size() - 1, msg.data());
 #   endif
 
-    getBlockTemplate();
+    // Clear previous hash and check daemon height to guarantee that xmrig will call get_block_template RPC later
+    // We can't call get_block_template directly because daemon is not ready yet
+    m_prevHash = nullptr;
+    m_blocktemplateRequestHash = nullptr;
+    send(kGetHeight);
+
+    const uint64_t t = m_pool.jobTimeout();
+    m_timer->stop();
+    m_timer->start(t, t);
 }
 
 

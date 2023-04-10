@@ -76,12 +76,13 @@ public:
     {
         m_workersMemory.clear();
         m_hugePages.reset();
-        m_memory    = memory;
-        m_started   = 0;
-        m_errors    = 0;
-        m_threads   = threads.size();
-        m_ways      = 0;
-        m_ts        = Chrono::steadyMSecs();
+        m_memory       = memory;
+        m_started      = 0;
+        m_totalStarted = 0;
+        m_errors       = 0;
+        m_threads      = threads.size();
+        m_ways         = 0;
+        m_ts           = Chrono::steadyMSecs();
     }
 
     inline bool started(IWorker *worker, bool ready)
@@ -433,10 +434,6 @@ rapidjson::Value xmrig::CpuBackend::toJSON(rapidjson::Document &doc) const
 
 #   ifdef XMRIG_ALGO_ARGON2
     out.AddMember("argon2-impl", argon2::Impl::name().toJSON(), allocator);
-#   endif
-
-#   ifdef XMRIG_ALGO_ASTROBWT
-    out.AddMember("astrobwt-max-size", cpu.astrobwtMaxSize(), allocator);
 #   endif
 
     out.AddMember("hugepages", d_ptr->hugePages(2, doc), allocator);
